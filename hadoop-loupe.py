@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from xml import etree
 import argparse
 import pygal
+import datetime
 
 class TimeStats:
     def __init__(self):
@@ -89,8 +90,8 @@ class TimeStats:
         self.submitTime = min(self.submitTime,t.submitTime)
         self.startTime = min(self.startTime,t.startTime)
         self.finishTime = max(self.finishTime,t.finishTime)
-        self.duration += t.duration
-        
+        # self.duration += t.duration
+        self.duration = self.finishTime - self.startTime
 
 class NumberStats:
     def __init__(self):
@@ -200,7 +201,7 @@ class CounterStats:
     def get_counter_value(self,groupname, name):
             ctrs = filter(lambda x: x.counterGroupName == groupname and x.name == name, self.counters.values())
             if len(ctrs) == 0:
-                return None
+                return 0
             else:
                 return long(ctrs[0].totalCounterValue)
     
@@ -242,7 +243,7 @@ class Application:
 
         
     def aggregate(self):
-        agg_job = Job(0,"aggregate")
+        agg_job = Job("AGG","aggregate")
         for job in self.jobs:
             agg_job.add(job)
             
@@ -320,6 +321,9 @@ class Job:
     def __str__(self):
         return "\njob %s - name:%s\n"%(self.id,self.name) + str(self.timeStats) + str(self.numberStats) #+ str(self.counterStats) #+ str(self.tasks)
         
+    def descr(self):
+        return "\njob %s - name:%s\n"%(self.id,self.name) + str(self.timeStats) + str(self.numberStats) + str(self.counterStats) + str(self.tasks)
+        
     def add(self, job):
             
         self.timeStats.add(job.timeStats)
@@ -342,6 +346,7 @@ def get_hadoop_application_stats(node, filter_fragment,filter_username, filter_s
     headers = {'accept': 'application/xml'}
     # assemble job list
     url = 'http://%s/ws/v1/history/mapreduce/jobs?user=%s&status=SUCCEEDED&startedTimeBegin=%s&startedTimeEnd=%s'%(historyserver,filter_username,filter_start,filter_end)
+    #print url 
     
     jobs = get(url,headers=headers)
     jobroot = ET.fromstring(jobs)
@@ -358,10 +363,12 @@ def get_hadoop_application_stats(node, filter_fragment,filter_username, filter_s
 
 
     # assemble job details
+    name = "app"
     for job in joblist:
         jobinfo = get('http://%s/ws/v1/history/mapreduce/jobs/%s'%(historyserver,job.id),headers=headers)
         jobroot = ET.fromstring(jobinfo)
         job.load_stats_from_xml(jobroot)
+        name = job.name
     
         jobcounters = get('http://%s/ws/v1/history/mapreduce/jobs/%s/counters'%(historyserver,job.id),headers=headers)
         # print jobcounters
@@ -373,7 +380,7 @@ def get_hadoop_application_stats(node, filter_fragment,filter_username, filter_s
     
 
 
-    app = Application("app")
+    app = Application(name)
     app.set_job_list(joblist)
     #print "\n".join(map(lambda (x,y): x + "." + y, app.get_counter_names()))
     
@@ -492,6 +499,141 @@ def render(data, filename, title):
     bar_chart.render_to_file(filename)
     
 
+def export_csv(dirname, app_stats,aggregate):
+    
+    #print agg.descr()
+    info = app_stats.id.split("_")
+    
+    if aggregate:
+        agg = app_stats.aggregate()
+        aggs = [agg]
+    else:
+        aggs = app_stats.get_job_list()
+    
+    for agg in aggs:
+        
+        epochTime = long(str(agg.timeStats.submitTime)[:-3]) #cut ms
+        submittime = datetime.datetime.fromtimestamp(epochTime)
+        
+        info_components = [
+            "info",
+            "EXP_" + info[1], # exp
+            info[2],# system
+            info[3][1:], # type
+            info[4][1:], # size
+            info[5][1:], # opts
+            info[6][1:], # query
+            "%s-%s-%s"%(submittime.year, submittime.month, submittime.day),
+            "%s:%s"%(submittime.hour,submittime.minute),
+            agg.id,
+            # we stopped getting it from description, because part of the
+            # name in the xml result was chopped off :(
+            # info[7][0:4] + "-" + info[7][4:6] + "-" + info[7][6:8],
+            # info[8][0:2]+":"+info[8][2:], # time
+        
+        ]
+    
+        times = [ 
+            'times',
+            agg.timeStats.duration,
+            agg.timeStats.startTime,
+            agg.timeStats.finishTime,
+    
+            agg.timeStats.totalMapTime,
+            agg.timeStats.totalReduceTime,
+            agg.timeStats.totalShuffleTime,
+            agg.timeStats.totalMergeTime,
+    
+            agg.timeStats.avgMapTime,
+            agg.timeStats.avgReduceTime,
+            agg.timeStats.avgShuffleTime,
+            agg.timeStats.avgMergeTime,
+        ]
+    
+        numbers = [
+            'numbers',
+            agg.numberStats.mapsCompleted,
+            agg.numberStats.reducesCompleted,
+        ]
+    
+        records = [
+            'records',
+            agg.counterStats.get_counter_value("Records","MAP_INPUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","MAP_OUTPUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","COMBINE_INPUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","COMBINE_OUTPUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","REDUCE_INPUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","REDUCE_OUTPUT_RECORDS"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.reducers.GumboRed1Counter","RED1_OUT_RECORDS"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round2.reducers.GumboRed2Counter","RED2_OUT_RECORDS"),
+            agg.counterStats.get_counter_value("Records","SPILLED_RECORDS"),
+        ]
+    
+        record_bytes = [
+            'record_bytes',
+            agg.counterStats.get_counter_value("Bytes","MAP_OUTPUT_BYTES"),
+            agg.counterStats.get_counter_value("Bytes","MAP_OUTPUT_MATERIALIZED_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.reducers.GumboRed1Counter","RED1_OUT_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round2.reducers.GumboRed2Counter","RED2_OUT_BYTES"),
+        ]
+    
+        messages = [
+            'messages',
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","REQUEST"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","KEEP_ALIVE_REQUEST"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","KEEP_ALIVE_ASSERT"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","ASSERT"),
+       
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round2.mappers.GumboMap2Counter","ASSERT_RECORDS"),
+            ]
+    
+        message_bytes = [
+            'message_bytes',
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","REQUEST_KEY_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","REQUEST_VALUE_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","REQUEST_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","KEEP_ALIVE_REQUEST_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","KEEP_ALIVE_ASSERT_BYTES"),
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.mappers.GumboMap1Counter","ASSERT_BYTES"),
+        
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round2.mappers.GumboMap2Counter","ASSERT_BYTES"),
+        ]
+    
+        bytes = [
+            'bytes',
+            agg.counterStats.get_counter_value("Bytes","FILE_BYTES_READ"),
+            agg.counterStats.get_counter_value("Bytes","FILE_BYTES_WRITTEN"),
+            agg.counterStats.get_counter_value("Bytes","HDFS_BYTES_READ"),
+            agg.counterStats.get_counter_value("Bytes","HDFS_BYTES_WRITTEN"),
+            agg.counterStats.get_counter_value("Bytes","REDUCE_SHUFFLE_BYTES"),
+            agg.counterStats.get_counter_value("Bytes","COMMITTED_HEAP_BYTES"),
+            agg.counterStats.get_counter_value("Bytes","VIRTUAL_MEMORY_BYTES"),   
+        ]
+    
+        extra = [
+            'extra', 
+            agg.counterStats.get_counter_value("gumbo.engine.hadoop.mrcomponents.round1.reducers.GumboRed1Counter","RED1_BUFFEREDITEMS"),
+            agg.counterStats.get_counter_value("Millis","CPU_MILLISECONDS"),
+            agg.counterStats.get_counter_value("Millis","MILLIS_MAPS"),
+            agg.counterStats.get_counter_value("Millis","MILLIS_REDUCES"),
+       
+        ]
+    
+        # print agg.counterStats.get_counter_groupnames()
+    
+        all = info_components + times + numbers + records + record_bytes + messages + message_bytes + bytes + extra
+    
+        print reduce(lambda x,y: str(x) + "," + str(y),all)
+    
+def print_header():
+    l = ["info","exp","system","type","size","opts","query","date","time","job"]+\
+    ["times","duration","starttime","finishtime","totalmaptime","totalreducetime","totalshuffletime","totalmergetime","avgmaptime","avgreducetime","avgshuffletime","avgmergetime","numbers","mapscompleted","reducescompleted",]+\
+    ["records","map_input_records","map_output_records","combine_input_records","combine_output_records","reduce_input_records","reduce_output_records","red1_out_records","red2_out_records","spilled_records","record_bytes","map_output_bytes","map_output_materialized_bytes","red1_out_bytes","red2_out_bytes",]+\
+    ["messages","request","keep_alive_request","keep_alive_assert","assert_records_r1","assert_records_r2",]+\
+    ["message_bytes","request_key_bytes","request_value_bytes","request_bytes","keep_alive_request_bytes","keep_alive_assert_bytes","assert_bytes_r1","assert_bytes_r2",]+\
+    ["bytes","file_bytes_read","file_bytes_written","hdfs_bytes_read","hdfs_bytes_written","reduce_shuffle_bytes","committed_heap_bytes","virtual_memory_bytes",]+\
+    ["extra","buffered_items","cpu_millis","map_millis","red_millis"]
+    print reduce(lambda x,y: x + "," + y, l)
 
 # pygal binding
 def export_html(dirname, app_stats):
@@ -616,9 +758,9 @@ def export_html(dirname, app_stats):
 def main():
     
     parser = argparse.ArgumentParser(description='Hadoop Job History Extractor.')
-    parser.add_argument("-s", "--server", action='store',required=True,\
+    parser.add_argument("-s", "--server", action='store',required=False, default="localhost",\
         help="the address of the job history server")
-    parser.add_argument("-o", "--output", action='store', required=True,\
+    parser.add_argument("-o", "--output", action='store', required=False, default="hadoop-loupe-output",\
         help="folder where to put the output")
     parser.add_argument("-u", "--user", action='store', required=False, default="",\
         help="filter jobs based on username")
@@ -629,7 +771,15 @@ def main():
     parser.add_argument("-j", "--jobname", action='store', default="",\
         help="jobs names are required to contain this substring")
     parser.add_argument("-v", "--verbose", action='store_true', default=False,\
-        help="display settings an job details in output")
+        help="display settings and job details in output")
+    parser.add_argument("-c", "--csv", action='store_true', default=False,\
+        help="only output one csv metrics line")
+    parser.add_argument("--header", "--header", action='store_true', default=False,\
+        help="add header to csv output")
+    parser.add_argument("--agg", "--agg", action='store_true', default=False,\
+        help="aggregate the csv output")
+    parser.add_argument("--headeronly", "--headeronly", action='store_true', default=False,\
+        help="only output csv header, then quit")
     args = parser.parse_args()
     # print args
     #print args.accumulate(args.integers)
@@ -637,6 +787,11 @@ def main():
     
     # get parameters
     params = vars(args)
+    
+    if params['headeronly']:
+        print_header()
+        quit()
+    
     
     verbose = params['verbose']
     # print params
@@ -650,13 +805,22 @@ def main():
     joblist = app_stats.get_job_list()
     if verbose:
         print joblist
-    print "found %s jobs"%len(joblist)
+        
+    if len(joblist) == 0:
+        quit()
     #
     # print app_stats.aggregate()
     #
     # print jobs_time_data(joblist)
     # print jobs_number_data(joblist)
-    export_html(params['output'], app_stats)
+    csv = params['csv']
+    if csv:
+        if params['header']:
+            print_header()
+        export_csv(params['output'], app_stats,params['agg'])
+    else:
+        print "found %s jobs"%len(joblist)
+        export_html(params['output'], app_stats)
     
     if verbose:
         print "done."
